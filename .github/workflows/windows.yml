@@ -1,4 +1,4 @@
-name: Windows
+name: Windows-10
 
 on:
    push:
