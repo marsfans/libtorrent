@@ -9,9 +9,9 @@ defaults:
    run:
       shell: cmd
 
-concurrency:
-   group: ${{ github.ref }}-${{ github.workflow }}-${{ github.event_name }}
-   cancel-in-progress: true
+#concurrency:
+ #  group: ${{ github.ref }}-${{ github.workflow }}-${{ github.event_name }}
+  # cancel-in-progress: true
 
 jobs:
 
