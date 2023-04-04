@@ -176,7 +176,7 @@ jobs:
         uses: actions/upload-artifact@v3.1.2
         with:
          name: win10-example
-         path: D:\a\libtorrent\libtorrent\boost\bin\msvc-14.2\debug\address-model-64\cxxstd-14-iso\deprecated-functions-off\link-static\threading-multi\*.exe
+         path: D:\a\libtorrent\libtorrent\bin\msvc-14.2\debug\address-model-64\cxxstd-14-iso\deprecated-functions-off\link-static\threading-multi\*.exe
    mingw:
       name: MingW
       runs-on: windows-latest
