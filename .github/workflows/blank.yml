@@ -177,8 +177,6 @@ jobs:
         with:
          name: win10-example
          path: D:\a\libtorrent\libtorrent\boost\bin\msvc-14.2\debug\address-model-64\cxxstd-14-iso\deprecated-functions-off\link-static\threading-multi\*.exe
-  with:
-    # Artifact name
    mingw:
       name: MingW
       runs-on: windows-latest
