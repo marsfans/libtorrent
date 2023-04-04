@@ -15,22 +15,203 @@ on:
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
-    steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v3
+   tests:
+      name: Test
+      runs-on: windows-latest
+      continue-on-error: true
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+      strategy:
+         matrix:
+           include:
+             - config: address-model=32 crypto=built-in
+             - config: address-model=64
+             - config: release
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      steps:
+      - name: checkout
+        uses: actions/checkout@v2
+        with:
+           submodules: true
+
+      - name: install openssl (64 bit)
+        uses: nick-invision/retry@v2
+        with:
+          timeout_minutes: 30
+          retry_wait_seconds: 4
+          max_attempts: 3
+          command: choco install openssl --limitoutput --no-progress
+
+      - name: install boost
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          git clone --depth=1 --recurse-submodules -j10 --branch=boost-1.79.0 https://github.com/boostorg/boost.git
+          cd boost
+          bootstrap.bat
+      - name: boost headers
+        run: |
+          cd boost
+          .\b2 headers
+      - name: tests (deterministic)
+        run: |
+          set BOOST_ROOT=%CD%\boost
+          set PATH=%BOOST_ROOT%;%PATH%
+          set PYTHON_INTERPRETER=python
+          cd test
+          b2 -l400 warnings=all warnings-as-errors=on ${{ matrix.config }} deterministic-tests
+      - name: tests (flaky)
+        run: |
+          set BOOST_ROOT=%CD%\boost
+          set PATH=%BOOST_ROOT%;%PATH%
+          set PYTHON_INTERPRETER=python
+          cd test
+          set c=3
+          :retry
+          if %c%==0 exit /B 1
+          set /a c = %c% -1
+          b2 -l400 warnings=all warnings-as-errors=on ${{ matrix.config }}
+          if %errorlevel%==0 exit /B 0
+          if %c% gtr 0 goto retry
+          exit /B 1
+   simulations:
+      name: Simulations
+      runs-on: windows-2019
+
+      steps:
+      - name: checkout
+        uses: actions/checkout@v2.3.3
+        with:
+           submodules: true
+
+      - name: install boost
+        run: |
+          git clone --depth=1 --recurse-submodules -j10 --branch=boost-1.79.0 https://github.com/boostorg/boost.git
+          cd boost
+          bootstrap.bat
+      - name: boost headers
+        run: |
+          cd boost
+          .\b2 headers
+      - shell: pwsh
+        run: |
+          echo "BOOST_ROOT=$(pwd)/boost" >> $env:GITHUB_ENV
+          echo "$(pwd)/boost" >> $env:GITHUB_PATH
+  # debug iterators are turned off here because msvc has issues with noexcept
+  # specifiers when debug iterators are enabled. Specifically, constructors that
+  # allocate memory are still marked as noexcept. That results in program
+  # termination
+  # the IOCP backend in asio appears to have an issue where it hangs under
+  # certain unexpected terminations (through exceptions)
+      - name: build sims
+        run: |
+          echo %BOOST_ROOT%
+          echo %PATH%
+          cd simulation
+          b2 --hash release address-model=64 link=static debug-iterators=off invariant-checks=on define=BOOST_ASIO_DISABLE_IOCP asserts=on testing.execute=off
+      - name: run sims
+        uses: nick-fields/retry@v2
+        with:
+          max_attempts: 3
+          timeout_minutes: 120
+          command: |
+            cd simulation
+            b2 --hash -l700 release address-model=64 link=static debug-iterators=off invariant-checks=on define=BOOST_ASIO_DISABLE_IOCP asserts=on
+   build:
+      name: Build
+      runs-on: windows-2019
+      continue-on-error: true
+
+      strategy:
+         matrix:
+           include:
+             - config: asio-debugging=on picker-debugging=on windows-version=vista
+             - config: windows-api=store windows-version=win10
+             - config: deprecated-functions=off
+
+      steps:
+      - name: checkout
+        uses: actions/checkout@v2.3.3
+        with:
+           submodules: true
+
+      - name: install boost
+        run: |
+          git clone --depth=1 --recurse-submodules -j10 --branch=boost-1.79.0 https://github.com/boostorg/boost.git
+          cd boost
+          bootstrap.bat
+      - name: install openssl (64 bit)
+        uses: nick-invision/retry@v2
+        with:
+          timeout_minutes: 30
+          retry_wait_seconds: 4
+          max_attempts: 3
+          command: choco install openssl --limitoutput --no-progress
+
+      - name: boost headers
+        run: |
+          cd boost
+          .\b2 headers
+      - name: build library
+        run: |
+          set BOOST_ROOT=%CD%\boost
+          set PATH=%BOOST_ROOT%;%PATH%
+          b2 ${{ matrix.config }} cxxstd=14 address-model=64 warnings=all warnings-as-errors=on
+      - name: build examples
+        if: ${{ ! contains(matrix.config, 'windows-api=store') }}
+        run: |
+          set BOOST_ROOT=%CD%\boost
+          set PATH=%BOOST_ROOT%;%PATH%
+          cd examples
+          b2 ${{ matrix.config }} address-model=64 warnings=all warnings-as-errors=on
+      - name: build tools
+        if: ${{ ! contains(matrix.config, 'windows-api=store') }}
+        run: |
+          set BOOST_ROOT=%CD%\boost
+          set PATH=%BOOST_ROOT%;%PATH%
+          cd tools
+          b2 ${{ matrix.config }} address-model=64 warnings=all warnings-as-errors=on
+   mingw:
+      name: MingW
+      runs-on: windows-latest
+      continue-on-error: true
+
+      strategy:
+         matrix:
+           include:
+             - config: address-model=64
+
+      steps:
+      - name: checkout
+        uses: actions/checkout@v2
+        with:
+           submodules: true
+
+      - name: install openssl (64 bit)
+        uses: nick-invision/retry@v2
+        with:
+          timeout_minutes: 30
+          retry_wait_seconds: 4
+          max_attempts: 3
+          command: choco install openssl --limitoutput --no-progress
+
+      - name: install boost
+        run: |
+          git clone --depth=1 --recurse-submodules -j10 --branch=boost-1.79.0 https://github.com/boostorg/boost.git
+          cd boost
+          bootstrap.bat
+      - name: boost headers
+        run: |
+          cd boost
+          .\b2 headers
+      - name: Set up MinGW
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+
+      - name: tests (deterministic)
+        run: |
+          set BOOST_ROOT=%CD%\boost
+          set PATH=%BOOST_ROOT%;%PATH%
+          set PYTHON_INTERPRETER=python
+          cd test
+          b2 toolset=gcc asserts=on release target-os=windows -l400 warnings=all warnings-as-errors=on ${{ matrix.config }} cxxflags=-Wno-error=array-bounds cxxflags=-Wno-error=stringop-overflow deterministic-tests testing.execute=off
+
