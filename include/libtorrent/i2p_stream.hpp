@@ -125,8 +125,10 @@ struct i2p_stream : proxy_base
 
 	void set_session_id(char const* id) { m_id = id; }
 
+	void set_local_i2p_endpoint(string_view d) { m_local = d.to_string(); }
+	std::string const& local_i2p_endpoint() const { return m_local; }
 	void set_destination(string_view d) { m_dest = d.to_string(); }
-	std::string const& destination() { return m_dest; }
+	std::string const& destination() const { return m_dest; }
 
 	template <class Handler>
 	void async_connect(endpoint_type const&, Handler h)
@@ -297,7 +299,16 @@ private:
 			std::tie(name, remaining) = split_string(remaining, '=');
 			if (name.empty()) break;
 			string_view value;
-			std::tie(value, remaining) = split_string(remaining, ' ');
+			if (remaining[0] == '"')
+			{
+				std::tie(value, remaining) = split_string(remaining.substr(1), '"');
+				if (value.empty()) { handle_error(invalid_response, h); return; }
+				value.remove_suffix(1);
+			}
+			else
+			{
+				std::tie(value, remaining) = split_string(remaining, ' ');
+			}
 			if (value.empty()) { handle_error(invalid_response, h); return; }
 
 			if ("RESULT"_sv == name)
@@ -338,16 +349,10 @@ private:
 		}
 
 		error_code ec(result, i2p_category());
-		switch (result)
+		if (ec)
 		{
-			case i2p_error::no_error:
-			case i2p_error::invalid_key:
-				break;
-			default:
-			{
-				handle_error (ec, h);
-				return;
-			}
+			std::forward<Handler>(h)(ec);
+			return;
 		}
 
 		switch (m_state)
@@ -367,14 +372,14 @@ private:
 				case cmd_none:
 				case cmd_name_lookup:
 				case cmd_incoming:
-					h(e);
+					std::forward<Handler>(h)(ec);
 					std::vector<char>().swap(m_buffer);
 			}
 			break;
 		case read_connect_response:
 		case read_session_create_response:
 		case read_name_lookup_response:
-			h(ec);
+			std::forward<Handler>(h)(ec);
 			std::vector<char>().swap(m_buffer);
 			break;
 		case read_accept_response:
@@ -440,8 +445,9 @@ private:
 
 	// send and receive buffer
 	aux::noexcept_movable<aux::vector<char>> m_buffer;
-	char const* m_id;
+	char const* m_id = nullptr;
 	std::string m_dest;
+	std::string m_local;
 	std::string m_name_lookup;
 
 	enum state_t : std::uint8_t
@@ -456,7 +462,7 @@ private:
 	command_t m_command;
 	state_t m_state;
 #if TORRENT_USE_ASSERTS
-	int m_magic;
+	int m_magic = 0x1337;
 #endif
 };
 
@@ -510,6 +516,7 @@ public:
 	}
 	void close(error_code&);
 
+	// TODO: make this a string_view
 	char const* session_id() const { return m_session_id.c_str(); }
 	std::string const& local_endpoint() const { return m_i2p_local_endpoint; }
 

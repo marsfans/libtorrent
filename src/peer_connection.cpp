@@ -1184,6 +1184,22 @@ namespace libtorrent {
 		t->received_synack(ipv6);
 	}
 
+#if TORRENT_USE_I2P
+	std::string const& peer_connection::destination() const
+	{
+		static std::string const empty;
+		auto s = boost::get<i2p_stream>(&m_socket);
+		return s ? s->destination() : empty;
+	}
+
+	std::string const& peer_connection::local_i2p_endpoint() const
+	{
+		static std::string const empty;
+		auto s = boost::get<i2p_stream>(&m_socket);
+		return s ? s->local_i2p_endpoint() : empty;
+	}
+#endif
+
 	typed_bitfield<piece_index_t> const& peer_connection::get_bitfield() const
 	{
 		TORRENT_ASSERT(is_single_thread());
@@ -1334,8 +1350,8 @@ namespace libtorrent {
 		}
 
 #if TORRENT_USE_I2P
-		auto* i2ps = boost::get<i2p_stream>(&m_socket);
-		if (!i2ps && t->torrent_file().is_i2p()
+		if (!aux::is_i2p(m_socket)
+			&& t->is_i2p()
 			&& !m_settings.get_bool(settings_pack::allow_i2p_mixed))
 		{
 			// the torrent is an i2p torrent, the peer is a regular peer
@@ -2230,7 +2246,7 @@ namespace libtorrent {
 			m_have_piece = bits;
 			m_num_pieces = bits.count();
 			t->set_seed(m_peer_info, m_num_pieces == bits.size());
-			TORRENT_ASSERT(is_seed() == (m_num_pieces == bits.size()));
+			TORRENT_ASSERT(!t->valid_metadata() || (is_seed() == (m_num_pieces == bits.size())));
 
 #if TORRENT_USE_INVARIANT_CHECKS
 			if (t && t->has_picker())
@@ -4553,7 +4569,6 @@ namespace libtorrent {
 		p.payload_down_speed = statistics().download_payload_rate();
 		p.payload_up_speed = statistics().upload_payload_rate();
 		p.pid = pid();
-		p.ip = remote();
 		p.pending_disk_bytes = m_outstanding_writing_bytes;
 		p.pending_disk_read_bytes = m_reading_bytes;
 		p.send_quota = m_quota[upload_channel];
@@ -4613,6 +4628,15 @@ namespace libtorrent {
 		p.flags = {};
 		get_specific_peer_info(p);
 
+#if TORRENT_USE_I2P
+		if (!(p.flags & peer_info::i2p_socket))
+#endif
+		{
+			p.ip = remote();
+			error_code ec;
+			p.local_endpoint = get_socket().local_endpoint(ec);
+		}
+
 		if (m_snubbed) p.flags |= peer_info::snubbed;
 		if (upload_only()) p.flags |= peer_info::upload_only;
 		if (m_endgame_mode) p.flags |= peer_info::endgame_mode;
@@ -4663,8 +4687,6 @@ namespace libtorrent {
 			p.progress_ppm = int(std::int64_t(p.pieces.count()) * 1000000 / p.pieces.size());
 		}
 
-		error_code ec;
-		p.local_endpoint = get_socket().local_endpoint(ec);
 	}
 
 #ifndef TORRENT_DISABLE_SUPERSEEDING

@@ -686,6 +686,13 @@ bool is_downloading_state(int const st)
 		if (!m_enable_dht) return false;
 		if (!m_ses.announce_dht()) return false;
 
+#if TORRENT_USE_I2P
+		// i2p torrents don't announced on the DHT
+		// unless we allow mixed swarms
+		if (is_i2p() && !settings().get_bool(settings_pack::allow_i2p_mixed))
+			return false;
+#endif
+
 		if (!m_ses.dht()) return false;
 		if (m_torrent_file->is_valid() && !m_files_checked) return false;
 		if (!m_announce_to_dht) return false;
@@ -1128,6 +1135,22 @@ bool is_downloading_state(int const st)
 		set_error(error.ec, error.file());
 
 		// if the error appears to be more serious than a full disk, just pause the torrent
+		pause();
+	}
+
+	void torrent::handle_inconsistent_hashes(piece_index_t const piece)
+	{
+		auto const file_slices = torrent_file().map_block(piece, 0, 0);
+		file_index_t const file = file_slices.empty() ? torrent_status::error_file_none : file_slices[0].file_index;
+		set_error(errors::torrent_inconsistent_hashes, file);
+		// if this is a hybrid torrent, we may have marked some more pieces
+		// as "have" but not yet validated them against the v2 hashes. At
+		// this point, just assume we have no pieces
+		m_picker.reset();
+		m_hash_picker.reset();
+		m_file_progress.clear();
+		m_have_all = false;
+		update_gauge();
 		pause();
 	}
 
@@ -2520,8 +2543,7 @@ bool is_downloading_state(int const st)
 
 		if ((hash_passed[0] && !hash_passed[1]) || (!hash_passed[0] && hash_passed[1]))
 		{
-			set_error(errors::torrent_inconsistent_hashes, torrent_status::error_file_none);
-			pause();
+			handle_inconsistent_hashes(piece);
 			return;
 		}
 		else if (hash_passed[0] || hash_passed[1])
@@ -2722,6 +2744,10 @@ bool is_downloading_state(int const st)
 #ifndef TORRENT_DISABLE_LOGGING
 			if (should_log())
 			{
+#if TORRENT_USE_I2P
+				if (is_i2p() && !settings().get_bool(settings_pack::allow_i2p_mixed))
+					debug_log("DHT: i2p torrent (and mixed peers not allowed)");
+#endif
 				if (!m_ses.announce_dht())
 					debug_log("DHT: no listen sockets");
 
@@ -2850,9 +2876,27 @@ bool is_downloading_state(int const st)
 
 namespace {
 	void refresh_endpoint_list(aux::session_interface& ses
+		, std::string const& url
 		, bool const is_ssl, bool const complete_sent
 		, std::vector<aux::announce_endpoint>& aeps)
 	{
+#if TORRENT_USE_I2P
+		if (is_i2p_url(url))
+		{
+			if (aeps.size() > 1)
+			{
+				aeps.erase(aeps.begin() + 1, aeps.end());
+			}
+			else if (aeps.empty())
+			{
+				aeps.emplace_back(aux::listen_socket_handle(), complete_sent);
+			}
+			return;
+		}
+#else
+		TORRENT_UNUSED(url);
+#endif
+
 		// update the endpoint list by adding entries for new listen sockets
 		// and removing entries for non-existent ones
 		std::size_t valid_endpoints = 0;
@@ -3071,7 +3115,7 @@ namespace {
 #ifndef TORRENT_DISABLE_LOGGING
 			++idx;
 #endif
-			refresh_endpoint_list(m_ses, is_ssl_torrent(), bool(m_complete_sent), ae.endpoints);
+			refresh_endpoint_list(m_ses, ae.url, is_ssl_torrent(), bool(m_complete_sent), ae.endpoints);
 
 			// if trackerid is not specified for tracker use default one, probably set explicitly
 			req.trackerid = ae.trackerid.empty() ? m_trackerid : ae.trackerid;
@@ -3270,7 +3314,14 @@ namespace {
 
 		req.kind |= tracker_request::scrape_request;
 		auto& ae = m_trackers[idx];
-		refresh_endpoint_list(m_ses, is_ssl_torrent(), bool(m_complete_sent), ae.endpoints);
+
+#if TORRENT_USE_I2P
+		if (is_i2p_url(ae.url))
+			req.kind |= tracker_request::i2p;
+		else if (is_i2p() && !settings().get_bool(settings_pack::allow_i2p_mixed))
+			return;
+#endif
+		refresh_endpoint_list(m_ses, ae.url, is_ssl_torrent(), bool(m_complete_sent), ae.endpoints);
 		req.url = ae.url;
 		req.private_torrent = m_torrent_file->priv();
 #if TORRENT_ABI_VERSION == 1
@@ -3503,11 +3554,11 @@ namespace {
 				continue;
 
 #if TORRENT_USE_I2P
-			if (r.i2pconn && string_ends_with(i.hostname, ".i2p"))
+			if (r.i2pconn)
 			{
 				// this is an i2p name, we need to use the SAM connection
 				// to do the name lookup
-				if (string_ends_with(i.hostname, ".b32.i2p"))
+				if (string_ends_with(i.hostname, ".i2p"))
 				{
 					ADD_OUTSTANDING_ASYNC("torrent::on_i2p_resolve");
 					r.i2pconn->async_name_lookup(i.hostname.c_str()
@@ -3518,7 +3569,7 @@ namespace {
 				{
 					torrent_state st = get_peer_list_state();
 					need_peer_list();
-					if (m_peer_list->add_i2p_peer(i.hostname.c_str (), peer_info::tracker, {}, &st))
+					if (m_peer_list->add_i2p_peer(i.hostname, peer_info::tracker, {}, &st))
 						state_updated();
 					peers_erased(st.erased);
 				}
@@ -3531,6 +3582,24 @@ namespace {
 					, std::bind(&torrent::on_peer_name_lookup, shared_from_this(), _1, _2, i.port, v));
 			}
 		}
+
+#if TORRENT_USE_I2P
+		if (r.i2pconn)
+		{
+			for (auto const& i : resp.i2p_peers)
+			{
+				torrent_state st = get_peer_list_state();
+				peer_entry p;
+				std::string destination = base32encode_i2p(i.destination);
+				destination += ".b32.i2p";
+
+				ADD_OUTSTANDING_ASYNC("torrent::on_i2p_resolve");
+				r.i2pconn->async_name_lookup(destination.c_str()
+					, [self = shared_from_this()] (error_code const& ec, char const* dest)
+					{ self->torrent::on_i2p_resolve(ec, dest); });
+			}
+		}
+#endif
 
 		// there are 2 reasons to allow local IPs to be returned from a
 		// non-local tracker
@@ -3583,8 +3652,12 @@ namespace {
 		if (m_ses.alerts().should_post<tracker_reply_alert>()
 			|| r.triggered_manually)
 		{
+			int peer_count = int(resp.peers.size() + resp.peers4.size());
+#if TORRENT_USE_I2P
+			peer_count += int(resp.i2p_peers.size());
+#endif
 			m_ses.alerts().emplace_alert<tracker_reply_alert>(
-				get_handle(), local_endpoint, int(resp.peers.size() + resp.peers4.size())
+				get_handle(), local_endpoint, peer_count
 				+ int(resp.peers6.size()), v, r.url);
 		}
 
@@ -3698,7 +3771,7 @@ namespace {
 			for (auto& e : m_trackers)
 			{
 				// make sure we check for new endpoints from the listen sockets
-				refresh_endpoint_list(m_ses, is_ssl_torrent(), bool(m_complete_sent), e.endpoints);
+				refresh_endpoint_list(m_ses, e.url, is_ssl_torrent(), bool(m_complete_sent), e.endpoints);
 				for (auto& aep : e.endpoints)
 				{
 					for (auto& a : aep.info_hashes)
@@ -3999,8 +4072,7 @@ namespace {
 
 		if (!error && ((passed && !v2_passed) || (!passed && v2_passed)))
 		{
-			set_error(errors::torrent_inconsistent_hashes, torrent_status::error_file_none);
-			pause();
+			handle_inconsistent_hashes(piece);
 			return;
 		}
 
@@ -4230,16 +4302,16 @@ namespace {
 				, i * default_block_size, block_hashes[i]);
 			last_result = result;
 
+			// all verified ranges should always be full pieces or less
+			TORRENT_ASSERT(result.first_verified_block >= 0
+				|| (result.first_verified_block % blocks_per_piece) == 0);
+			TORRENT_ASSERT(result.num_verified <= blocks_per_piece
+				|| (result.num_verified % blocks_per_piece) == 0);
+
 			if (result.status == set_block_hash_result::result::success)
 			{
 				TORRENT_ASSERT(result.first_verified_block < blocks_in_piece);
 				TORRENT_ASSERT(blocks_in_piece <= blocks_per_piece);
-
-				// all verified ranges should always be full pieces or less
-				TORRENT_ASSERT(result.first_verified_block >= 0
-					|| (result.first_verified_block % blocks_per_piece) == 0);
-				TORRENT_ASSERT(result.num_verified <= blocks_per_piece
-					|| (result.num_verified % blocks_per_piece) == 0);
 
 				// note that result.num_verified may cover pad blocks too, and
 				// so may be > blocks_in_piece
@@ -4262,14 +4334,10 @@ namespace {
 				TORRENT_ASSERT(first_block <= i);
 				TORRENT_ASSERT(i < first_block + count);
 
-				using delta = piece_index_t::diff_type;
-
 				// if the hashes for more than one piece have been verified,
 				// check for any pieces which were already checked but couldn't
 				// be verified and mark them as verified
-				for (piece_index_t verified_piece = piece + delta(result.first_verified_block / blocks_per_piece)
-					, end = verified_piece + delta(result.num_verified / blocks_per_piece)
-					; verified_piece < end; ++verified_piece)
+				for (piece_index_t verified_piece : result.piece_range(piece, blocks_per_piece))
 				{
 					if (!has_picker()
 						|| verified_piece == piece
@@ -4294,6 +4362,20 @@ namespace {
 			// it actually failed. Otherwise it might have been failing
 			// because of other, previously existing block hashes.
 			ret = false;
+
+			// if the hashes for more than one piece have been verified,
+			// check for any pieces which were already checked but couldn't
+			// be verified and mark them as verified
+			for (piece_index_t verified_piece : last_result.piece_range(piece, blocks_per_piece))
+			{
+				if (!has_picker()
+					|| verified_piece == piece)
+					continue;
+
+				m_picker->we_dont_have(verified_piece);
+				update_gauge();
+				piece_failed(verified_piece);
+			}
 		}
 
 		if (boost::indeterminate(ret) && std::all_of(block_passed.begin(), block_passed.end()
@@ -6777,8 +6859,7 @@ namespace {
 		{
 			if (torrent_file().info_hashes().has_v1() && have_piece(p.first))
 			{
-				set_error(errors::torrent_inconsistent_hashes, torrent_status::error_file_none);
-				pause();
+				handle_inconsistent_hashes(p.first);
 				return result.valid;
 			}
 
@@ -6793,8 +6874,7 @@ namespace {
 		{
 			if (torrent_file().info_hashes().has_v1() && !have_piece(p))
 			{
-				set_error(errors::torrent_inconsistent_hashes, torrent_status::error_file_none);
-				pause();
+				handle_inconsistent_hashes(p);
 				return result.valid;
 			}
 
@@ -7436,9 +7516,11 @@ namespace {
 
 			aux::socket_type ret = instantiate_connection(m_ses.get_context()
 				, proxy, nullptr, nullptr, false, false);
-			boost::get<i2p_stream>(ret).set_destination(static_cast<i2p_peer*>(peerinfo)->dest());
-			boost::get<i2p_stream>(ret).set_command(i2p_stream::cmd_connect);
-			boost::get<i2p_stream>(ret).set_session_id(m_ses.i2p_session());
+			i2p_stream& str = boost::get<i2p_stream>(ret);
+			str.set_local_i2p_endpoint(m_ses.local_i2p_endpoint());
+			str.set_destination(static_cast<i2p_peer*>(peerinfo)->dest());
+			str.set_command(i2p_stream::cmd_connect);
+			str.set_session_id(m_ses.i2p_session());
 			return ret;
 		}
 		else
